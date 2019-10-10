@@ -1,0 +1,236 @@
+version: "3"
+volumes:
+  prometheus_data: {}
+  grafana_data: {}
+services:
+  mysql:
+    image: mysql:5.7
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_USER=icmdb
+      - MYSQL_PASSWORD=icmdb
+    expose:
+      - 3306
+    ports:
+      - 3306:3306
+    restart: always
+    command: ["mysqld", "--max-allowed-packet=512M"]
+
+  zookeeper:
+    image: wurstmeister/zookeeper
+    ports:
+      - "2181:2181"
+  kafka:
+    image: wurstmeister/kafka
+    environment:
+      KAFKA_ADVERTISED_HOST_NAME: 172.16.1.120
+      KAFKA_CREATE_TOPICS: "btc-share"
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper
+    links:
+      - zookeeper:zookeeper
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "9092:9092"
+
+  icmdb:
+    build:
+      context: ../
+      dockerfile: ./docker/Dockerfile
+      args:
+       - project=icmdb-test
+       - profile=prod
+    environment:
+      - project=icmdb-test
+      - profile=prod
+      - COIN=btc
+      - AP_FLASH_MYSQL=mysql
+      - AP_FLASH_USER=icmdb
+      - AP_FLASH_PASS=icmdb
+      - AP_BPS_MYSQL=mysql
+      - AP_BPS_USER=icmdb
+      - AP_BPS_PASS=icmdb
+      - AP_BOOTSTRAP_SERVERS=kafka:9092
+    ports:
+      - 8000:8080
+    volumes:
+      - /opt/icmdb-test/logs:/opt/icmdb-test/logs
+      - /opt/icmdb-test/data:/opt/icmdb-test/data
+    depends_on:
+      - mysql
+    links:
+      - mysql:mysql
+      - kafka:kafka
+    #command: sleep 30000
+    restart: always
+
+  prometheus:
+    image: registry.cn-beijing.aliyuncs.com/ap-1001/prometheus
+    envitonment:
+      - 'constraint:aliyun.node_index==(${node_index})'
+    labels:
+      aliyun.scale: '1'
+      aliyun.probe.url: 'tcp://container:9090'
+      aliyun.probe.timeout_seconds: 3
+      aliyun.probe.initial_delay_seconds: 3
+      aliyun.rolling_updates: 'true'
+      aliyun.proxy.required: 'true'
+      aliyun.proxy.VIRTUAL_HOST: 'prometheus.private,prometheus-icmdb.antpool.com'
+    volumes:
+      - '/opt/prometheus/:/etc/prometheus/'
+      - 'prometheus_data:/prometheus:rw'
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention=30d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    expose:
+      - 9090
+    links:
+      - 'cadvisor:cadvisor'
+      - 'alertmanager:alertmanager'
+      - 'node-exporter:node-exporter'
+      - 'push-gateway:push-gateway'
+      - 'kafkaexporter:kafkaexporter'
+      - 'mysqlexporter:mysqlexporter'
+    external_links:
+      - 'proxy:icmdb-btc.private'
+      - 'proxy:cadvisor.private'
+      - 'proxy:pushgateway.private'
+      - 'proxy:icmdb-test-btc.private'
+    depends_on:
+      - cadvisor
+    restart: always
+  push-gateway:
+    image: prom/pushgateway
+    envitonment:
+      - 'constraint:aliyun.node_index==(${node_index})'
+    labels:
+      aliyun.scale: '1'
+      aliyun.probe.url: 'tcp://container:9091'
+      aliyun.probe.timeout_seconds: 3
+      aliyun.probe.initial_delay_seconds: 3
+      aliyun.rolling_updates: 'true'
+      aliyun.proxy.required: 'true'
+      aliyun.proxy.VIRTUAL_HOST: 'pushgateway.private,pushgateway-icmdb.antpool.com'
+    expose:
+      - 9091
+    restart: always
+  node-exporter:
+    image: prom/node-exporter
+    envitonment:
+      - 'constraint:aliyun.node_index==(${node_index})'
+    labels:
+      aliyun.global: true
+      aliyun.probe.url: 'tcp://container:9100'
+      aliyun.probe.timeout_seconds: 6
+      aliyun.probe.initial_delay_seconds: 6
+      aliyun.rolling_updates: 'true'
+      aliyun.proxy.required: 'true'
+      aliyun.proxy.VIRTUAL_HOST: 'exporter.private,exporter-icmdb.antpool.com'
+    volumes:
+      - '/proc:/host/proc:ro'
+      - '/sys:/host/sys:ro'
+      - '/:/rootfs:ro'
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.ignored-mount-points'
+      - >-
+        ^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)
+    expose:
+      - 9100
+    ports:
+      - '9100:9100'
+    restart: always
+  alertmanager:
+    image: prom/alertmanager
+    envitonment:
+      - 'constraint:aliyun.node_index==(${node_index})'
+    labels:
+      aliyun.scale: '1'
+      aliyun.probe.url: 'tcp://container:9093'
+      aliyun.probe.timeout_seconds: 6
+      aliyun.probe.initial_delay_seconds: 6
+      aliyun.rolling_updates: 'true'
+      aliyun.proxy.required: 'true'
+      aliyun.proxy.VIRTUAL_HOST: 'alertmanager.private,alertmanager-icmdb.antpool.com'
+    expose:
+      - 9093
+    restart: always
+    command:
+      - '--storage.path=/alertmanager'
+  cadvisor:
+    image: google/cadvisor
+    envitonment:
+      - 'constraint:aliyun.node_index==(${node_index})'
+    labels:
+      aliyun.scale: '1'
+      aliyun.probe.url: 'tcp://container:8080'
+      aliyun.probe.timeout_seconds: 6
+      aliyun.probe.initial_delay_seconds: 6
+      aliyun.rolling_updates: 'true'
+      aliyun.proxy.required: 'true'
+      aliyun.proxy.VIRTUAL_HOST: 'cadvisor.private,cadvisor-icmdb.antpool.com'
+      aliyun.log_store_stdout: stdout
+    volumes:
+      - '/:/rootfs:ro'
+      - '/var/run:/var/run:rw'
+      - '/sys:/sys:ro'
+      - '/var/lib/docker/:/var/lib/docker:ro'
+    expose:
+      - 8080
+    restart: always
+  grafana:
+    image: grafana/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - 'constraint:aliyun.node_index==(${node_index})'
+    labels:
+      aliyun.scale: '1'
+      aliyun.probe.url: 'tcp://container:3000'
+      aliyun.probe.timeout_seconds: 3
+      aliyun.probe.initial_delay_seconds: 3
+      aliyun.rolling_updates: 'true'
+      aliyun.proxy.required: 'true'
+      aliyun.proxy.VIRTUAL_HOST: 'grafana.private,grafana-icmdb.antpool.com'
+      aliyun.log_store_stdout: stdout
+    expose:
+      - 3000
+    volumes:
+      - 'grafana_data:/var/lib/grafana'
+      - '/opt/grafana/provisioning/:/etc/grafana/provisioning/'
+    depends_on:
+      - prometheus
+    links:
+      - 'prometheus:prometheus'
+    external_links:
+      - 'icmdb-test-btc:icmdb-test-btc'
+      - 'proxy:prometheus.private'
+    restart: always
+
+  mysqlexporter:
+    image: prom/mysqld-exporter
+    expose:
+      - '9104'
+    environment:
+      - 'DATA_SOURCE_NAME=prometheus:${MYSQL_DBPASS}@(${MYSQL_DBHOST}:3306)/performance_schema'
+
+  kafkaexporter:
+    image: 'danielqsj/kafka-exporter:latest'
+    labels:
+      aliyun.scale: '1'
+    expose:
+      - 9308
+    volumes:
+      - /etc/hosts:/etc/hosts:ro
+    command:
+      - '--kafka.server=${KAFKA_SERVER1}:9092'
+      - '--kafka.server=${KAFKA_SERVER2}:9092'
+      - '--kafka.server=${KAFKA_SERVER3}:9092'
+      - '--kafka.server=${KAFKA_BENCH_SERVER1}:9092'
+      - '--kafka.server=${KAFKA_BENCH_SERVER2}:9092'
+      - '--kafka.server=${KAFKA_BENCH_SERVER3}:9092'
+    restart: always
